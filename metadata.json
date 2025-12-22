@@ -1,0 +1,7 @@
+{
+  "name": "Chloe’s Musical Adventure",
+  "description": "A real-time pitch detection trainer using machine learning to identify piano notes via microphone",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
