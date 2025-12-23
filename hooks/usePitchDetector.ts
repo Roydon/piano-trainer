@@ -6,6 +6,7 @@ import { getNoteFromFrequency, formatNoteDisplay } from '../utils/audioHelpers';
 // Note: ml5's CREPE model doesn't expose confidence in the standard callback, 
 // so we rely on its internal threshold and our stability check.
 const STABILITY_THRESHOLD_MS = 100; // Time a note must be held to be registered
+const SILENCE_THRESHOLD_MS = 300; // Time of silence before clearing the current note
 const HISTORY_LIMIT = 5;
 const MODEL_URL = 'https://cdn.jsdelivr.net/gh/ml5js/ml5-data-and-models/models/pitch-detection/crepe/';
 
@@ -25,6 +26,9 @@ export const usePitchDetector = (): PitchDetectorState => {
   const candidateNoteRef = useRef<string | null>(null); // The string representation (e.g. "C4")
   const candidateStartTimeRef = useRef<number>(0);
   const currentStableNoteRef = useRef<string | null>(null);
+  
+  // Ref for silence detection
+  const silenceStartRef = useRef<number | null>(null);
 
   const updateHistory = useCallback((newNote: NoteData) => {
     setHistory(prev => {
@@ -48,13 +52,17 @@ export const usePitchDetector = (): PitchDetectorState => {
       return;
     }
 
+    const now = Date.now();
+
     // ml5 sometimes returns null or very low/high frequencies for noise
     if (frequency && frequency > 0) {
       const detected = getNoteFromFrequency(frequency);
 
       if (detected) {
+        // Sound detected: Reset silence timer
+        silenceStartRef.current = null;
+
         const detectedNoteStr = formatNoteDisplay(detected);
-        const now = Date.now();
 
         // 1. Check if matches candidate
         if (detectedNoteStr === candidateNoteRef.current) {
@@ -74,12 +82,30 @@ export const usePitchDetector = (): PitchDetectorState => {
           candidateNoteRef.current = detectedNoteStr;
           candidateStartTimeRef.current = now;
         }
-      } 
-      // If frequency detected but out of piano range (getNoteFromFrequency returns null), ignore
+      } else {
+        // Frequency detected but not a valid note (e.g. Sharp or out of range)
+        // Treat as silence/noise regarding note holding? 
+        // Or just ignore? Let's treat as noise/silence for note clearing purposes.
+        if (silenceStartRef.current === null) {
+          silenceStartRef.current = now;
+        }
+      }
     } else {
        // No pitch detected (silence)
-       // We don't immediately clear currentNote to prevent UI flashing during short gaps
-       // But we do reset the candidate so a new note must be held again
+       if (silenceStartRef.current === null) {
+         silenceStartRef.current = now;
+       }
+       
+       // Check if silence has exceeded threshold
+       if (now - silenceStartRef.current > SILENCE_THRESHOLD_MS) {
+         if (currentStableNoteRef.current !== null) {
+           currentStableNoteRef.current = null;
+           setCurrentNote(null);
+           candidateNoteRef.current = null;
+         }
+       }
+       
+       // Reset candidate immediately on silence so a new note must be held again
        candidateNoteRef.current = null;
     }
 
@@ -156,14 +182,16 @@ export const usePitchDetector = (): PitchDetectorState => {
 
     // Suspend/Close context
     if (audioContextRef.current) {
-      audioContextRef.current.suspend();
-      // We don't close immediately in case we want to reuse, but creating new one is safer
-      // audioContextRef.current = null; // Let's keep ref but create new one on start
+      // It's good practice to close the context to release hardware resources
+      // and prevent hitting browser limits on the number of active contexts.
+      audioContextRef.current.close().catch(e => console.error("Error closing AudioContext:", e));
+      audioContextRef.current = null;
     }
 
     // Reset state
     candidateNoteRef.current = null;
     currentStableNoteRef.current = null;
+    silenceStartRef.current = null;
     
     setStatus('ready');
   };

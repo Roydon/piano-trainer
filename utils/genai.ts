@@ -1,22 +1,32 @@
+
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { StickerInfo, STICKER_MAP } from "./audioHelpers";
+import { logger } from "./logger";
 
-// Initialize Gemini
-// Note: In a real production build, ensure process.env.API_KEY is defined in your build environment
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+// Helper to get a fresh AI client instance.
+// Critical: We must instantiate this *inside* the function calls because 
+// process.env.API_KEY might be populated dynamically after the module has loaded
+// (e.g., after the user selects a key via window.aistudio).
+const getAiClient = () => {
+  return new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+};
 
 export const generateStorySession = async (
   noteSequence: string[]
 ): Promise<string[]> => {
-  // Fallback if no API key
+  // Check availability inside the function
   if (!process.env.API_KEY) {
+    logger.warn("No API Key found. Using fallback story text.");
     return noteSequence.map(note => {
       const char = STICKER_MAP[note];
       return `Help ${char?.characterName || 'your friend'} play the note ${note}!`;
     });
   }
 
+  logger.info(`Starting Story Generation for ${noteSequence.length} notes...`);
+
   try {
+    const ai = getAiClient();
     const model = ai.models;
     
     // Construct the sequence description for the AI
@@ -45,6 +55,7 @@ export const generateStorySession = async (
       Return ONLY a JSON array of strings. Ensure the array has exactly ${noteSequence.length} items.
     `;
 
+    logger.info("Sending prompt to Gemini Flash...");
     const response = await model.generateContent({
       model: 'gemini-3-flash-preview',
       contents: prompt,
@@ -61,26 +72,29 @@ export const generateStorySession = async (
     
     // Validate length match
     if (Array.isArray(json) && json.length === noteSequence.length) {
+      logger.success("Story text generated successfully.");
       return json;
     } else {
         // Fallback if length mismatch or error, fill missing with defaults
-        console.warn("GenAI returned mismatching length or invalid format");
+        logger.warn("GenAI returned mismatching length or invalid format. Filling with defaults.");
         const filled = noteSequence.map((note, i) => 
           (Array.isArray(json) && json[i]) ? json[i] : `Play ${note}!`
         );
         return filled;
     }
 
-  } catch (error) {
+  } catch (error: any) {
+    logger.error(`GenAI Error: ${error.message}`);
     console.error("GenAI Error:", error);
     return noteSequence.map(note => `Play ${note}!`);
   }
 };
 
-export const generateSpeech = async (text: string): Promise<string | null> => {
+export const generateSpeech = async (text: string, attempt = 1): Promise<string | null> => {
   if (!process.env.API_KEY) return null;
 
   try {
+    const ai = getAiClient();
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
       contents: [{ parts: [{ text }] }],
@@ -97,8 +111,16 @@ export const generateSpeech = async (text: string): Promise<string | null> => {
     // Extract base64 audio
     return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
 
-  } catch (error) {
-    console.error("Gemini TTS Error:", error);
+  } catch (error: any) {
+    // Retry logic for rate limits or transient errors
+    if (attempt <= 3 && (error.status === 429 || error.message?.includes('429') || error.status === 503)) {
+        const delay = 1000 * Math.pow(2, attempt);
+        logger.warn(`TTS Rate limit/Error. Retrying "${text.substring(0, 10)}..." in ${delay}ms (Attempt ${attempt})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return generateSpeech(text, attempt + 1);
+    }
+    
+    logger.error(`TTS Error for "${text.substring(0, 10)}...": ${error.message}`);
     return null;
   }
 };
@@ -106,34 +128,22 @@ export const generateSpeech = async (text: string): Promise<string | null> => {
 export const generateSpeechBatch = async (texts: string[]): Promise<(string | null)[]> => {
   if (!process.env.API_KEY) return texts.map(() => null);
 
-  // We chunk the requests to avoid hitting rate limits or overwhelming the network with 50 simultaneous requests.
-  const BATCH_SIZE = 4;
-  const results: (string | null)[] = new Array(texts.length).fill(null);
-  
-  // Process in chunks
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const chunkEnd = Math.min(i + BATCH_SIZE, texts.length);
-    const chunk = texts.slice(i, chunkEnd);
-    
-    // Create promises for current chunk
-    const chunkPromises = chunk.map(async (text, idx) => {
-      const globalIndex = i + idx;
-      try {
-        const audio = await generateSpeech(text);
-        return { index: globalIndex, audio };
-      } catch (e) {
-        return { index: globalIndex, audio: null };
-      }
-    });
+  logger.info(`Starting TTS Batch Process. Total items: ${texts.length}`);
 
-    // Wait for chunk to complete
-    const chunkResults = await Promise.all(chunkPromises);
-    
-    // Store results
-    chunkResults.forEach(res => {
-      results[res.index] = res.audio;
-    });
-  }
+  // Execute all requests in parallel ("Single Batch" logic)
+  const promises = texts.map(async (text, index) => {
+    try {
+      // Add a tiny random jitter to prevent perfect synchronization of requests hitting the server
+      await new Promise(r => setTimeout(r, Math.random() * 200)); 
+      const audio = await generateSpeech(text);
+      return audio;
+    } catch (e) {
+      return null;
+    }
+  });
 
+  const results = await Promise.all(promises);
+
+  logger.success("All Audio Batches completed.");
   return results;
 };

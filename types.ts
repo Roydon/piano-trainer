@@ -1,3 +1,5 @@
+
+
 export interface NoteData {
   note: string;      // e.g., "C", "F#"
   octave: number;    // e.g., 4, 5
@@ -19,8 +21,13 @@ export interface PitchDetectorState {
   error: string | null;
 }
 
-// Augment window to include ml5 since we are loading from CDN
+// Augment window to include ml5 and aistudio
 declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
+
   interface Window {
     ml5: any;
     AudioContext: typeof AudioContext;
